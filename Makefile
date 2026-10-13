@@ -99,12 +99,12 @@ schedule:
 	    -e 's|@BIN@|$(APPS)/disktree.app/Contents/MacOS/disktree|' \
 	    -e 's|@LOG@|$(HOME)/Library/Logs/disktree-snapshot.log|' \
 	    packaging/macos/snapshot.plist.in > "$(AGENT)"
-	-launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null
+	@launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null || true
 	launchctl bootstrap gui/$$(id -u) "$(AGENT)"
 	@echo "daily snapshot scheduled: $(AGENT)"
 
 unschedule:
-	-launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null
+	@launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null || true
 	rm -f "$(AGENT)"
 else
 install: build

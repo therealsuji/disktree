@@ -27,7 +27,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 use crate::palette;
 use crate::state::{
-    ColorMode, Crumb, Disktree, GrowthWindow, PANEL_REMS, Screen, panel_width,
+    Answer, ColorMode, Crumb, Disktree, GrowthWindow, PANEL_REMS, Screen,
+    panel_width,
 };
 use crate::treemap_view::{self, Mosaic};
 use crate::ui::{icon, size, space, text};
@@ -1619,6 +1620,55 @@ fn selection_section(
         .child(grid)
         .children(badges)
         .child(actions)
+        .children(agent_line(app, path.as_deref(), theme, cx))
+}
+
+/// Ask the local agent about the selection, or what it said.
+fn agent_line(
+    app: &Disktree,
+    path: Option<&std::path::Path>,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Option<Div> {
+    let (agent, _) = app.agent.as_ref()?;
+    let caption = |text: String, color: Hsla| {
+        div().text_size(text::CAPTION).text_color(color).child(text)
+    };
+    let line = div().flex().flex_col().gap(space::XS);
+    Some(match path.and_then(|path| app.answers.get(path)) {
+        Some(Answer::Pending) => line.child(caption(
+            format!("Asking {}\u{2026}", agent.label()),
+            theme.secondary,
+        )),
+        Some(Answer::Said(text)) => line
+            .child(caption(format!("{} says", agent.label()), theme.secondary))
+            .child(
+                div()
+                    .text_size(text::CAPTION)
+                    .text_color(theme.foreground)
+                    .children(
+                        text.lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .map(|line| div().child(line.to_owned())),
+                    ),
+            ),
+        Some(Answer::Failed(error)) => {
+            line.child(caption(error.clone(), theme.danger))
+        }
+        None => line.child(
+            button(
+                "ask-agent",
+                format!("Ask {} \u{00b7} e", agent.label()),
+                ButtonVariant::Secondary,
+                cx,
+            )
+            .tab_stop(false)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.ask_agent(cx);
+                window.focus(&this.focus, cx);
+            })),
+        ),
+    })
 }
 
 /// The biggest things that could plausibly go, with their total.
@@ -2388,7 +2438,7 @@ fn review_button(
 /// to every other key and the scan's own numbers hold the trailing edge.
 fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
     // Most useful first, so a narrow window clips the least useful.
-    let hints: [(&str, &str); 11] = [
+    let hints: [(&str, &str); 12] = [
         ("space", "mark"),
         ("enter", "open"),
         ("\u{232b}", "up"),
@@ -2397,6 +2447,7 @@ fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         ("/", "filter"),
         ("[ ]", "depth"),
         ("t", "mode"),
+        ("e", "ask agent"),
         ("0", "reset"),
         ("v", "volumes"),
         ("r", "rescan"),
@@ -3701,7 +3752,11 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
             "Filter by name: only matches keep their colour; enter shows only them",
         ),
         ("c", "Review the marked list"),
-        ("t", "Size, files or age: what areas and colours say"),
+        (
+            "t",
+            "Size, files, age or growth: what areas and colours say",
+        ),
+        ("e", "Ask a local agent what it is and if it can go"),
         ("r", "Scan again from the same root"),
         ("esc", "Stop a scan in progress"),
         ("v", "Scan another volume"),

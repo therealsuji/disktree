@@ -11,6 +11,7 @@
 // reach one. Ignored elsewhere.
 #![windows_subsystem = "windows"]
 
+mod agent;
 mod app_menu;
 mod appearance;
 mod git;
@@ -45,6 +46,8 @@ struct Args {
     options: ScanOptions,
     depth: u32,
     power: Option<power::PowerEfficiency>,
+    /// The local agent `e` asks, when one was named.
+    agent: Option<agent::Agent>,
     /// Scan, write the result into the history and exit, without a window.
     snapshot: bool,
 }
@@ -80,6 +83,7 @@ options:
       --thread-system-cpu-percent N
                         best-effort host CPU budget; 0 disables it (80)
       --metric files    rank by file count instead of bytes
+      --agent NAME      ask claude (default) or codex with e
       --snapshot        scan PATH (default: the whole disk), save it to the
                         growth history and exit; for a scheduled job, so
                         history builds up while the window is closed
@@ -195,6 +199,9 @@ fn run() -> Result<()> {
                                 cx,
                             );
                             app.power_choice = args.power;
+                            if args.agent.is_some() {
+                                app.agent = agent::find(args.agent);
+                            }
                             app
                         })
                     },
@@ -270,6 +277,7 @@ fn parse_args_with_power(
     let mut depth = 3_u32;
     let mut disk = false;
     let mut snapshot = false;
+    let mut agent = None;
     // `std::env::args` panics on a name that is not Unicode, and a path is
     // any name: a restart as administrator hands the root back exactly as
     // it was, so the caller passes `args_os`.
@@ -294,6 +302,13 @@ fn parse_args_with_power(
             "-X" | "--cross-filesystems" => options.one_filesystem = false,
             "-D" | "--disk" => disk = true,
             "--snapshot" => snapshot = true,
+            "--agent" => {
+                let value = text(args.next(), "--agent needs a name")?;
+                agent = Some(
+                    agent::Agent::parse(&value)
+                        .context("unknown agent; try claude or codex")?,
+                );
+            }
             "-d" | "--depth" => {
                 let value = text(args.next(), "--depth needs a number")?;
                 depth = value.parse().context("--depth needs a number")?;
@@ -413,6 +428,7 @@ fn parse_args_with_power(
         options,
         depth: depth.clamp(1, 6),
         power,
+        agent,
         snapshot,
     })
 }

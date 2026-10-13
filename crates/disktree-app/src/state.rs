@@ -51,6 +51,14 @@ pub enum ColorMode {
     Growth,
 }
 
+/// What a local agent said about a path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Pending,
+    Said(String),
+    Failed(String),
+}
+
 /// How far back growth is measured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GrowthWindow {
@@ -456,6 +464,12 @@ pub struct Disktree {
     pub growth: Option<Arc<Growth>>,
     pub growth_window: GrowthWindow,
     growth_epoch: u64,
+    /// The local agent `e` asks, and where it is; `None` when neither is
+    /// installed.
+    pub agent: Option<(crate::agent::Agent, PathBuf)>,
+    /// What the agent said, per path asked about. Kept across scans: what
+    /// a directory is does not change when it is measured again.
+    pub answers: FxHashMap<PathBuf, Answer>,
     /// What git knows about each checkout that has been selected; `None`
     /// once asked and found not to be one.
     pub git: FxHashMap<PathBuf, Option<GitState>>,
@@ -578,6 +592,8 @@ impl Disktree {
             growth: None,
             growth_window: GrowthWindow::default(),
             growth_epoch: 0,
+            agent: crate::agent::find(None),
+            answers: FxHashMap::default(),
             git: FxHashMap::default(),
             git_pending: FxHashSet::default(),
             device: None,
@@ -869,6 +885,83 @@ impl Disktree {
             self.growth_window = window;
             self.refresh_growth(false, cx);
         }
+    }
+
+    /// `e`: ask the local agent what the pointed-at entry is and whether it
+    /// can go. Off the UI thread; the answer shows in the selection panel.
+    pub fn ask_agent(&mut self, cx: &mut Context<'_, Self>) {
+        let Some((agent, binary)) = self.agent.clone() else {
+            self.notice = Some((
+                "no local agent found: install claude or codex".into(),
+                Status::Warning,
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(crumbs) = self.action_target() else {
+            return;
+        };
+        let (Some(node), Some(path)) =
+            (self.node_at(&crumbs), self.path_at(&crumbs))
+        else {
+            return;
+        };
+        if self.answers.get(&path) == Some(&Answer::Pending) {
+            return;
+        }
+        let growth = self
+            .growth
+            .as_deref()
+            .and_then(|growth| growth.delta(&crumbs))
+            .map(|delta| {
+                let sign = if delta < 0 { "-" } else { "+" };
+                format!(
+                    "{sign}{} in {}",
+                    disktree_core::size::human_bytes(delta.unsigned_abs()),
+                    self.growth_window.label()
+                )
+            });
+        let kind = node.reclaim.map_or_else(
+            || node.category.label().to_owned(),
+            |reclaim| {
+                format!("{} ({})", node.category.label(), reclaim.label())
+            },
+        );
+        let question = crate::agent::Question {
+            path: path.clone(),
+            is_dir: node.is_dir(),
+            size: disktree_core::size::human_bytes(node.bytes),
+            kind,
+            last_write: crate::widgets::ago(self.scanned_at, node.modified),
+            growth,
+            largest: node
+                .children
+                .iter()
+                .take(8)
+                .map(|child| {
+                    (
+                        child.name.to_string(),
+                        disktree_core::size::human_bytes(child.bytes),
+                    )
+                })
+                .collect(),
+        };
+        self.answers.insert(path.clone(), Answer::Pending);
+        let task = cx
+            .background_executor()
+            .spawn(async move { crate::agent::ask(agent, &binary, &question) });
+        cx.spawn(async move |this, cx| {
+            let answer = match task.await {
+                Ok(text) => Answer::Said(text),
+                Err(error) => Answer::Failed(error),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.answers.insert(path, answer);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Ask git about `path` once, off the UI thread, if it is a checkout.
@@ -2860,6 +2953,7 @@ impl Disktree {
                 self.set_mode((self.mode_index() + 1) % 4, cx);
             }
             "r" if !control => self.start_scan(cx),
+            "e" if !control => self.ask_agent(cx),
             "g" if !control => self.go_to_disk(cx),
             "v" if !control && !shift => self.open_volumes(cx),
             "i" if !control => {
