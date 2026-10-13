@@ -9,9 +9,9 @@
 //! overstates its growth by less than the threshold.
 //!
 //! A snapshot is a plain text file. There is one per root, scan settings and
-//! UTC day: a later scan the same day replaces it, so the rescan after every
-//! removal does not pile files up, and a day-old baseline always exists once
-//! the app has been used on two days.
+//! UTC day, and the day's first scan is the one kept. Later scans that day
+//! leave it alone, so the rescan after every removal does not pile files up,
+//! and the scan on screen never overwrites the baseline it is compared with.
 
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -97,8 +97,9 @@ fn settings(options: &ScanOptions) -> String {
     )
 }
 
-/// Write `tree`, scanned from `root` at `taken`, into `dir`, and delete
-/// snapshots older than [`KEEP_DAYS`].
+/// Write `tree`, scanned from `root` at `taken`, into `dir` unless that day
+/// already has a snapshot of it, and delete snapshots older than
+/// [`KEEP_DAYS`].
 pub fn record(
     dir: &Path,
     root: &Path,
@@ -114,6 +115,13 @@ pub fn record(
     };
     let settings = settings(options);
     fs::create_dir_all(dir)?;
+    let mut key = FxHasher::default();
+    (root_text, &settings).hash(&mut key);
+    let day = taken.div_euclid(DAY);
+    let target = dir.join(format!("{day}-{:016x}.{EXTENSION}", key.finish()));
+    if target.exists() {
+        return prune(dir, day - KEEP_DAYS);
+    }
 
     let mut text = format!(
         "{MAGIC}\ntaken {taken}\nroot {root_text}\nsettings {settings}\n\n"
@@ -121,17 +129,13 @@ pub fn record(
     let mut path = root.to_path_buf();
     write_entries(tree, &mut path, &mut text);
 
-    let mut key = FxHasher::default();
-    (root_text, &settings).hash(&mut key);
-    let day = taken.div_euclid(DAY);
-    let name = format!("{day}-{:016x}.{EXTENSION}", key.finish());
-    // Written beside the target and renamed over it, so a reader never sees
-    // half a snapshot and a failed write leaves the previous one.
-    let partial = dir.join(format!("{name}.partial"));
+    // Written beside the target and renamed into place, so a reader never
+    // sees half a snapshot.
+    let partial = target.with_extension("partial");
     let mut file = fs::File::create(&partial)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
-    fs::rename(&partial, dir.join(name))?;
+    fs::rename(&partial, &target)?;
 
     prune(dir, day - KEEP_DAYS)
 }
@@ -422,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_scan_the_same_day_replaces_the_snapshot() {
+    fn the_first_scan_of_a_day_is_kept() {
         let store = tempfile::tempdir().unwrap();
         let root = Path::new("/home/me");
         let options = ScanOptions::default();
@@ -437,7 +441,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             base.sizes.get(Path::new("/home/me/Library/Caches")),
-            Some(&(300 * MIB))
+            Some(&(100 * MIB))
         );
     }
 
