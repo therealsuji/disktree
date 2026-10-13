@@ -69,8 +69,13 @@ fmt:
 ifeq ($(UNAME),Darwin)
 # Replaced whole rather than copied over: a stale file left inside a signed
 # bundle breaks its signature.
+# SIGN names a codesigning identity, such as an Apple Development
+# certificate. An ad hoc signature changes with every build, and macOS then
+# treats each build as a new app and asks for Full Disk Access again; a real
+# identity keeps the grant across rebuilds.
+SIGN ?=
 install:
-	$(CARGO) xtask bundle
+	$(CARGO) xtask bundle $(if $(SIGN),--sign "$(SIGN)")
 	install -d "$(APPS)" "$(BINDIR)"
 	rm -rf "$(APPS)/disktree.app"
 	ditto "$(BUNDLE)" "$(APPS)/disktree.app"
