@@ -45,6 +45,8 @@ struct Args {
     options: ScanOptions,
     depth: u32,
     power: Option<power::PowerEfficiency>,
+    /// Scan, write the result into the history and exit, without a window.
+    snapshot: bool,
 }
 
 const USAGE: &str = "\
@@ -78,6 +80,9 @@ options:
       --thread-system-cpu-percent N
                         best-effort host CPU budget; 0 disables it (80)
       --metric files    rank by file count instead of bytes
+      --snapshot        scan PATH (default: the whole disk), save it to the
+                        growth history and exit; for a scheduled job, so
+                        history builds up while the window is closed
   -h, --help            show this help
 ";
 
@@ -123,6 +128,10 @@ fn run() -> Result<()> {
             .spawn()
             .context("start disktree")?;
         return Ok(());
+    }
+
+    if args.snapshot {
+        return snapshot(&args.root, &args.options);
     }
 
     let root = args.root.clone();
@@ -203,6 +212,45 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// Follow each desktop's user configuration location; never write beside
+/// the executable or scanned root. No home/config location means session-only.
+pub fn config_dir() -> Option<PathBuf> {
+    let home = std::env::home_dir();
+    let base = if cfg!(target_os = "macos") {
+        home.map(|home| home.join("Library/Application Support"))
+    } else if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| home.map(|home| home.join(".config")))
+    };
+    base.map(|base| base.join("disktree"))
+}
+
+/// Where scan history is kept: see [`disktree_core::drift`].
+pub fn drift_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("drift"))
+}
+
+/// `--snapshot`: what the window does when a scan lands, without the window.
+fn snapshot(root: &std::path::Path, options: &ScanOptions) -> Result<()> {
+    let dir = drift_dir().context("no configuration directory")?;
+    let tree = disktree_core::scan::scan(root, options.clone())
+        .with_context(|| format!("cannot scan {}", root.display()))?;
+    let taken = state::now_seconds();
+    disktree_core::drift::record(&dir, root, &tree, options, taken)
+        .with_context(|| format!("cannot write to {}", dir.display()))?;
+    println!(
+        "{}: {} saved to {}",
+        root.display(),
+        disktree_core::size::human_bytes(tree.bytes),
+        dir.display()
+    );
+    Ok(())
+}
+
 /// Read the command line, program name already skipped.
 #[cfg(test)]
 fn parse_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Args> {
@@ -221,6 +269,7 @@ fn parse_args_with_power(
     let mut power = Some(preset);
     let mut depth = 3_u32;
     let mut disk = false;
+    let mut snapshot = false;
     // `std::env::args` panics on a name that is not Unicode, and a path is
     // any name: a restart as administrator hands the root back exactly as
     // it was, so the caller passes `args_os`.
@@ -244,6 +293,7 @@ fn parse_args_with_power(
             "-x" | "--one-filesystem" => options.one_filesystem = true,
             "-X" | "--cross-filesystems" => options.one_filesystem = false,
             "-D" | "--disk" => disk = true,
+            "--snapshot" => snapshot = true,
             "-d" | "--depth" => {
                 let value = text(args.next(), "--depth needs a number")?;
                 depth = value.parse().context("--depth needs a number")?;
@@ -334,7 +384,13 @@ fn parse_args_with_power(
         "--disk and a PATH cannot be combined"
     );
     let home = std::env::home_dir();
+    // A scheduled snapshot covers the whole disk unless told otherwise: its
+    // history then serves as the baseline for any folder opened later.
     let root = match root {
+        None if snapshot => home
+            .as_deref()
+            .and_then(disktree_core::space::volume_root_for)
+            .unwrap_or_else(|| PathBuf::from("/")),
         _ if disk => home
             .as_deref()
             .and_then(disktree_core::space::volume_root_for)
@@ -357,6 +413,7 @@ fn parse_args_with_power(
         options,
         depth: depth.clamp(1, 6),
         power,
+        snapshot,
     })
 }
 

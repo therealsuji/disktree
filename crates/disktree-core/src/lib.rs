@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod classify;
+pub mod drift;
 pub mod export;
 pub mod filter;
 pub mod insights;

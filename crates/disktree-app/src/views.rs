@@ -12,7 +12,7 @@ use disktree_core::tree::Metric;
 use gpui_kit::base::CheckboxState;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, Div, DragMoveEvent, ElementId,
-    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
     MouseDownEvent, ParentElement, Rems, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Window, anchored, deferred, div,
     pattern_slash, px, relative,
@@ -27,7 +27,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 use crate::palette;
 use crate::state::{
-    ColorMode, Crumb, Disktree, PANEL_REMS, Screen, panel_width,
+    ColorMode, Crumb, Disktree, GrowthWindow, PANEL_REMS, Screen, panel_width,
 };
 use crate::treemap_view::{self, Mosaic};
 use crate::ui::{icon, size, space, text};
@@ -801,6 +801,7 @@ fn view_settings(
                 ChoiceItem::new("size", "Size"),
                 ChoiceItem::new("files", "Files"),
                 ChoiceItem::new("age", "Age"),
+                ChoiceItem::new("growth", "Growth"),
             ],
             Some(app.mode_index()),
             move |index, window, cx| {
@@ -1261,7 +1262,27 @@ fn legend(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         .gap(space::MD)
         .min_w_0()
         .overflow_hidden();
-    if app.color_mode == ColorMode::Age {
+    if app.color_mode == ColorMode::Growth {
+        let since = app.growth.as_deref().map_or_else(
+            || "No earlier scan yet".to_owned(),
+            |growth| {
+                format!("Since {}", widgets::ago(app.scanned_at, growth.since))
+            },
+        );
+        lane = lane.child(
+            div()
+                .flex_shrink_0()
+                .text_size(text::CAPTION)
+                .text_color(theme.foreground)
+                .child(since),
+        );
+        for (bucket, (_, label)) in palette::GROWTH_BUCKETS.iter().enumerate() {
+            lane = lane.child(item(
+                widgets::swatch(palette::growth_fill(theme, bucket, 0)),
+                label,
+            ));
+        }
+    } else if app.color_mode == ColorMode::Age {
         for (bucket, (_, label)) in palette::AGE_BUCKETS.iter().enumerate() {
             lane = lane.child(item(
                 widgets::swatch(palette::age_accent(theme, bucket)),
@@ -1344,6 +1365,14 @@ fn side_panel(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .children(growing_section(app, theme, cx).map(|section| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::LG)
+                        .child(section)
+                        .child(rule())
+                }))
                 .child(worth_section(app, theme, cx))
                 .child(rule())
                 .child(marked_section(app, theme, cx)),
@@ -1593,6 +1622,205 @@ fn selection_section(
 }
 
 /// The biggest things that could plausibly go, with their total.
+/// One line of a side-panel list: a tile it reveals when clicked.
+struct PanelRow {
+    id: String,
+    title: String,
+    detail: String,
+    amount: String,
+    /// Of the list's largest, for the bar.
+    share: f32,
+    accent: Hsla,
+    active: bool,
+    crumbs: Vec<usize>,
+}
+
+fn panel_row(
+    row: PanelRow,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Stateful<Div> {
+    let PanelRow {
+        id,
+        title,
+        detail,
+        amount,
+        share,
+        accent,
+        active,
+        crumbs,
+    } = row;
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space::SM)
+        .px(space::SM)
+        .py(space::XS)
+        .when(active, |this| this.bg(theme.hover_fill()))
+        .hover(|style| style.bg(theme.hover_fill()))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.reveal(crumbs.clone(), cx);
+            window.focus(&this.focus, cx);
+        }))
+        .child(div().flex_shrink_0().w(px(2.)).h(space::XL).bg(accent))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(text::BODY)
+                        .text_color(theme.bright)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(text::CAPTION)
+                        .text_color(theme.secondary.opacity(0.8))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(space::XS)
+                .flex_shrink_0()
+                .w(size::ROW_BAR)
+                .child(
+                    div()
+                        .text_size(text::BODY)
+                        .text_color(theme.bright)
+                        .child(amount),
+                )
+                .child(widgets::bar(share, accent, cx)),
+        )
+}
+
+/// The 24h | 7d | 30d choice: how far back the growth list and the growth
+/// colours look. Plain text in the list's header rather than a control in
+/// the settings row, which has no room left at the smallest window.
+fn growth_windows(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Div {
+    let mut row = div().flex().flex_row().gap(space::SM);
+    for choice in GrowthWindow::ALL {
+        let on = choice == app.growth_window;
+        let id = format!("growth-{}", choice.label());
+        row = row.child(
+            div()
+                .id(ElementId::Name(id.clone().into()))
+                .debug_selector(move || id)
+                .text_size(text::CAPTION)
+                .text_color(if on { theme.bright } else { theme.secondary })
+                .when(on, |this| this.font_weight(FontWeight::SEMIBOLD))
+                .hover(|style| style.text_color(theme.bright))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_growth_window(choice, cx);
+                    window.focus(&this.focus, cx);
+                }))
+                .child(choice.label()),
+        );
+    }
+    row
+}
+
+/// Rows the growth list shows.
+const GROWING_ROWS: usize = 8;
+
+/// What grew since the earlier scan, where it grew. Shown in growth mode,
+/// and in any mode once there is something to show.
+fn growing_section(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Option<Div> {
+    let growers = app
+        .growth
+        .as_deref()
+        .map_or(&[][..], |growth| growth.growers.as_slice());
+    if growers.is_empty() && app.color_mode != ColorMode::Growth {
+        return None;
+    }
+    let largest = growers.first().map_or(1, |grower| grower.delta);
+    let mut section = div().flex().flex_col().gap(space::XS).child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .pb(space::XS)
+            .child(widgets::eyebrow("Growing", cx))
+            .child(growth_windows(app, theme, cx)),
+    );
+    if growers.is_empty() {
+        return Some(
+            section.child(
+                div()
+                    .text_size(text::CAPTION)
+                    .text_color(theme.secondary)
+                    .child(if app.growth.is_some() {
+                        "Nothing grew much"
+                    } else {
+                        "Scan again on a later day to compare"
+                    }),
+            ),
+        );
+    }
+    let tree = app.tree();
+    let selected = app.action_target();
+    for (index, grower) in growers.iter().take(GROWING_ROWS).enumerate() {
+        let Some(node) = app.node_at(&grower.crumbs) else {
+            continue;
+        };
+        let chain = tree
+            .map_or_else(Vec::new, |tree| tree.resolve_chain(&grower.crumbs));
+        let names: Vec<&str> =
+            chain.iter().skip(1).map(|node| &*node.name).collect();
+        let before = node.bytes.saturating_sub(grower.delta.unsigned_abs());
+        section = section.child(panel_row(
+            PanelRow {
+                id: format!("grower-{index}"),
+                title: names[names.len().saturating_sub(2)..].join("/"),
+                detail: format!(
+                    "{} \u{2192} {}",
+                    human_bytes(before),
+                    human_bytes(node.bytes)
+                ),
+                amount: format!(
+                    "+{}",
+                    human_bytes(grower.delta.unsigned_abs())
+                ),
+                share: grower.delta as f32 / largest.max(1) as f32,
+                accent: palette::growth_fill(
+                    theme,
+                    palette::growth_bucket(grower.delta),
+                    0,
+                ),
+                active: selected.as_deref() == Some(grower.crumbs.as_slice()),
+                crumbs: grower.crumbs.clone(),
+            },
+            theme,
+            cx,
+        ));
+    }
+    Some(section)
+}
+
 fn worth_section(
     app: &Disktree,
     theme: &Theme,
@@ -1636,71 +1864,21 @@ fn worth_section(
             continue;
         };
         let (title, detail) = insight_text(app, candidate);
-        let accent = palette::category_accent(theme, node.category);
-        let active = selected.as_deref() == Some(candidate.crumbs.as_slice());
-        let crumbs = candidate.crumbs.clone();
-        section = section.child(
-            div()
-                .id(ElementId::Name(format!("insight-{index}").into()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(space::SM)
-                .px(space::SM)
-                .py(space::XS)
-                .when(active, |this| this.bg(theme.hover_fill()))
-                .hover(|style| style.bg(theme.hover_fill()))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.reveal(crumbs.clone(), cx);
-                    window.focus(&this.focus, cx);
-                }))
-                .child(div().flex_shrink_0().w(px(2.)).h(space::XL).bg(accent))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(text::BODY)
-                                .text_color(theme.bright)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(text::CAPTION)
-                                .text_color(theme.secondary.opacity(0.8))
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(detail),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap(space::XS)
-                        .flex_shrink_0()
-                        .w(size::ROW_BAR)
-                        .child(
-                            div()
-                                .text_size(text::BODY)
-                                .text_color(theme.bright)
-                                .child(human_bytes(candidate.bytes)),
-                        )
-                        .child(widgets::bar(
-                            candidate.bytes as f32 / largest.max(1) as f32,
-                            accent,
-                            cx,
-                        )),
-                ),
-        );
+        section = section.child(panel_row(
+            PanelRow {
+                id: format!("insight-{index}"),
+                title,
+                detail,
+                amount: human_bytes(candidate.bytes),
+                share: candidate.bytes as f32 / largest.max(1) as f32,
+                accent: palette::category_accent(theme, node.category),
+                active: selected.as_deref()
+                    == Some(candidate.crumbs.as_slice()),
+                crumbs: candidate.crumbs.clone(),
+            },
+            theme,
+            cx,
+        ));
     }
     section
 }

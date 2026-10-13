@@ -125,6 +125,47 @@ pub fn age_accent(theme: &Theme, bucket: usize) -> Hsla {
     }
 }
 
+/// The growth ramp: shrank, steady, then growing by more and more. The
+/// edges are bytes of change; steady is anything within the smallest step
+/// either way, which [`disktree_core::drift::MIN_GROWTH`] also uses.
+pub const GROWTH_BUCKETS: [(i64, &str); 5] = [
+    (-STEADY, "Shrank"),
+    (STEADY, "Steady"),
+    (512 * MIB, "+64 MB"),
+    (2048 * MIB, "+512 MB"),
+    (i64::MAX, "+2 GB"),
+];
+
+const MIB: i64 = 1024 * 1024;
+const STEADY: i64 = disktree_core::drift::MIN_GROWTH.cast_signed();
+
+/// Which [`GROWTH_BUCKETS`] entry a change in bytes falls in.
+pub fn growth_bucket(delta: i64) -> usize {
+    if delta <= -STEADY {
+        return 0;
+    }
+    GROWTH_BUCKETS
+        .iter()
+        .skip(1)
+        .position(|(limit, _)| delta < *limit)
+        .map_or(GROWTH_BUCKETS.len() - 1, |index| index + 1)
+}
+
+/// The fill for growth mode: steady space keeps the neutral ground, growth
+/// takes on the theme accent the faster it was, and shrinking leans to the
+/// success colour.
+pub fn growth_fill(theme: &Theme, bucket: usize, depth: u32) -> Hsla {
+    let ground = category_fill(theme, Category::Other, depth);
+    let (toward, strength) = match bucket {
+        0 => (theme.success, 0.35),
+        1 => return ground,
+        2 => (theme.accent, 0.3),
+        3 => (theme.accent, 0.55),
+        _ => (theme.accent, 0.8),
+    };
+    mix(ground, toward, strength)
+}
+
 /// The one strong colour: selection, the main action, what can be had back.
 pub const fn highlight(theme: &Theme) -> Hsla {
     theme.warning

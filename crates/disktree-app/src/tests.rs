@@ -1844,3 +1844,52 @@ fn the_power_menu_offers_only_what_the_cpus_can_tell_apart(
     draw(cx);
     assert!(read(&view, cx, |app| app.power_menu.is_none()));
 }
+
+/// Growth mode compares the tree on screen with the history: what grew is
+/// listed where it grew, and the window draws its colours and the list.
+#[gpui_kit::test]
+fn growth_mode_lists_what_grew_since_an_earlier_scan(cx: &mut TestAppContext) {
+    use crate::state::GrowthWindow;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let root = temp.path().to_path_buf();
+    let history = tempfile::tempdir().expect("history");
+    let earlier = scan(&root, options()).expect("scan the fixture");
+    let two_days_ago = crate::state::now_seconds() - 2 * 86_400;
+    disktree_core::drift::record(
+        history.path(),
+        &root,
+        &earlier,
+        &options(),
+        two_days_ago,
+    )
+    .expect("record");
+
+    // Sparse, so the test writes nothing; apparent size counts its length.
+    let log = root.join("junk/app.log");
+    std::fs::File::create(&log)
+        .and_then(|file| file.set_len(200 * 1024 * 1024))
+        .expect("grow the log");
+
+    let (view, cx) = view_over(&root, cx);
+    update(&view, cx, |app, cx| {
+        app.drift_dir = Some(history.path().to_owned());
+        app.set_mode(3, cx);
+        app.set_growth_window(GrowthWindow::Day, cx);
+    });
+    cx.run_until_parked();
+    draw(cx);
+
+    let growers = read(&view, cx, |app| {
+        let growth = app.growth.clone().expect("a baseline was found");
+        assert_eq!(growth.since, two_days_ago);
+        growth
+            .growers
+            .iter()
+            .map(|grower| (app.path_at(&grower.crumbs), grower.delta))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(growers, [(Some(log), 200 * 1024 * 1024)]);
+    assert!(cx.debug_bounds("growth-24h").is_some());
+}

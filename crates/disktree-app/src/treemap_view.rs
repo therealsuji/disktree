@@ -36,8 +36,9 @@ pub struct TileDeco {
     pub depth: u32,
     /// What kind of data it is: the hue.
     pub category: Category,
-    /// In age mode, which [`palette::AGE_BUCKETS`] entry it falls in.
-    pub age_bucket: Option<usize>,
+    /// In age or growth mode, the step of that ramp it is drawn in instead
+    /// of its kind's hue.
+    pub ramp: Option<Ramp>,
     /// Its space can be had back: hatched.
     pub reclaimable: bool,
     /// How it stands against the find text.
@@ -49,6 +50,15 @@ pub struct TileDeco {
     pub covered: bool,
     pub hovered: bool,
     pub selected: bool,
+}
+
+/// A step on one of the ramps that replace a tile's kind colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ramp {
+    /// A [`palette::AGE_BUCKETS`] entry.
+    Age(usize),
+    /// A [`palette::GROWTH_BUCKETS`] entry.
+    Growth(usize),
 }
 
 /// Everything the mosaic needs for one frame.
@@ -155,6 +165,8 @@ struct Colors {
     strip: Vec<Hsla>,
     /// Fills per age bucket, then per depth.
     age: Vec<[Hsla; DEPTHS]>,
+    /// Fills per growth bucket, then per depth.
+    growth: Vec<[Hsla; DEPTHS]>,
     marked_fill: Hsla,
     /// The surface a filtered-out fill steps back toward.
     inset: Hsla,
@@ -217,6 +229,11 @@ impl Colors {
                     ladder(&|depth| palette::age_fill(theme, bucket, depth))
                 })
                 .collect(),
+            growth: (0..palette::GROWTH_BUCKETS.len())
+                .map(|bucket| {
+                    ladder(&|depth| palette::growth_fill(theme, bucket, depth))
+                })
+                .collect(),
             marked_fill: palette::mix(theme.inset, theme.danger, 0.16),
             inset: theme.inset,
         }
@@ -228,8 +245,12 @@ impl Colors {
             return self.marked_fill;
         }
         let depth = (tile.depth as usize).min(DEPTHS - 1);
-        let fill = match tile.age_bucket {
-            Some(bucket) => self.age[bucket.min(self.age.len() - 1)][depth],
+        let step = |ramp: &[[Hsla; DEPTHS]], bucket: usize| {
+            ramp[bucket.min(ramp.len() - 1)][depth]
+        };
+        let fill = match tile.ramp {
+            Some(Ramp::Age(bucket)) => step(&self.age, bucket),
+            Some(Ramp::Growth(bucket)) => step(&self.growth, bucket),
             None => self.fill[category_index(tile.category)][depth],
         };
         // Only what matches keeps its colour; a directory holding matches
@@ -300,7 +321,7 @@ fn paint_tiles(
         // A top-level directory carries a thin strip of its colour, so the
         // first level of structure reads before any detail.
         if tile.depth == 0
-            && tile.age_bucket.is_none()
+            && tile.ramp.is_none()
             && tile.filtered != Filtered::Out
         {
             let strip = Bounds::new(

@@ -26,7 +26,8 @@ TARGET = target/release/disktree
 ICON = assets/disktree.svg
 DESKTOP = packaging/disktree.desktop.in
 
-.PHONY: help build run install uninstall bundle lint test ci fmt clean
+.PHONY: help build run install uninstall bundle lint test ci fmt clean \
+	schedule unschedule
 
 help:
 	@echo "disktree"
@@ -37,6 +38,8 @@ help:
 	@echo "                   (macOS: disktree.app into $(APPS))"
 	@echo "  make bundle      macOS: build target/bundle/disktree.app and its zip"
 	@echo "  make uninstall   remove what install put there"
+	@echo "  make schedule    macOS: snapshot the whole disk daily, for growth"
+	@echo "  make unschedule  macOS: stop the daily snapshot"
 	@echo "  make lint        rustfmt --check and clippy -D warnings"
 	@echo "  make test        core and window-harness tests"
 	@echo "  make ci          lint, then test"
@@ -79,10 +82,30 @@ install:
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) \
 	    echo; echo "note: $(BINDIR) is not on PATH in this shell";; esac
 
-uninstall:
+uninstall: unschedule
 	rm -rf "$(APPS)/disktree.app"
 	@if [ -L "$(BINDIR)/disktree" ]; then rm -f "$(BINDIR)/disktree"; fi
 	@echo "removed"
+
+# The job runs the installed app's own binary, so it can use the app's Full
+# Disk Access grant (if macOS gives it one) and reads what the window reads.
+AGENT_LABEL = io.github.tobi.disktree.snapshot
+AGENT = $(HOME)/Library/LaunchAgents/$(AGENT_LABEL).plist
+schedule:
+	@test -x "$(APPS)/disktree.app/Contents/MacOS/disktree" || \
+	    { echo "run make install first"; exit 1; }
+	install -d "$(HOME)/Library/LaunchAgents"
+	sed -e 's|@LABEL@|$(AGENT_LABEL)|' \
+	    -e 's|@BIN@|$(APPS)/disktree.app/Contents/MacOS/disktree|' \
+	    -e 's|@LOG@|$(HOME)/Library/Logs/disktree-snapshot.log|' \
+	    packaging/macos/snapshot.plist.in > "$(AGENT)"
+	-launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null
+	launchctl bootstrap gui/$$(id -u) "$(AGENT)"
+	@echo "daily snapshot scheduled: $(AGENT)"
+
+unschedule:
+	-launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null
+	rm -f "$(AGENT)"
 else
 install: build
 	install -d $(BINDIR) $(APPDIR) $(ICONDIR)

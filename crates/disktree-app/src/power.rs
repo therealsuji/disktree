@@ -98,21 +98,8 @@ pub fn cpu_threads() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
 
-/// Follow each desktop's user configuration location; never write beside
-/// the executable or scanned root. No home/config location means session-only.
 pub fn settings_path() -> Option<PathBuf> {
-    let home = std::env::home_dir();
-    let base = if cfg!(target_os = "macos") {
-        home.map(|home| home.join("Library/Application Support"))
-    } else if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| home.map(|home| home.join(".config")))
-    };
-    base.map(|base| base.join("disktree/power-efficiency"))
+    crate::config_dir().map(|dir| dir.join("power-efficiency"))
 }
 
 pub fn load(path: &Path) -> io::Result<PowerEfficiency> {

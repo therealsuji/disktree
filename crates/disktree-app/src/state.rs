@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use disktree_core::access::file_table_readable;
+use disktree_core::drift::{self, Growth};
 use disktree_core::filter::{Keep, Matches, filter};
 use disktree_core::insights::{Candidate, worth_a_look};
 use disktree_core::removal::{
@@ -36,7 +37,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::git::GitState;
 
 use crate::marks::{Marks, display_path, is_hidden};
-use crate::treemap_view::{Mosaic, TileDeco};
+use crate::treemap_view::{Mosaic, Ramp, TileDeco};
 
 /// What a tile's colour says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,6 +47,37 @@ pub enum ColorMode {
     Kind,
     /// How long since anything in it was written.
     Age,
+    /// How much it grew or shrank since an earlier scan.
+    Growth,
+}
+
+/// How far back growth is measured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GrowthWindow {
+    Day,
+    #[default]
+    Week,
+    Month,
+}
+
+impl GrowthWindow {
+    pub const ALL: [Self; 3] = [Self::Day, Self::Week, Self::Month];
+
+    pub const fn days(self) -> i64 {
+        match self {
+            Self::Day => 1,
+            Self::Week => 7,
+            Self::Month => 30,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Month => "30d",
+        }
+    }
 }
 
 /// A trail crumb's sibling menu, open.
@@ -417,6 +449,13 @@ pub struct Disktree {
     pub color_mode: ColorMode,
     /// The largest things worth clearing, recomputed when a scan lands.
     pub insights: Vec<Candidate>,
+    /// Where scan history is kept, or `None` to keep none.
+    pub drift_dir: Option<PathBuf>,
+    /// How the tree on screen compares with an earlier scan; `None` until
+    /// that is known, or when there is no earlier scan to compare with.
+    pub growth: Option<Arc<Growth>>,
+    pub growth_window: GrowthWindow,
+    growth_epoch: u64,
     /// What git knows about each checkout that has been selected; `None`
     /// once asked and found not to be one.
     pub git: FxHashMap<PathBuf, Option<GitState>>,
@@ -533,6 +572,12 @@ impl Disktree {
             crumb_menu: None,
             color_mode: ColorMode::Kind,
             insights: Vec::new(),
+            // Tests scan real directories; they must not write history into
+            // the config directory of whoever runs them.
+            drift_dir: if cfg!(test) { None } else { crate::drift_dir() },
+            growth: None,
+            growth_window: GrowthWindow::default(),
+            growth_epoch: 0,
             git: FxHashMap::default(),
             git_pending: FxHashSet::default(),
             device: None,
@@ -759,6 +804,73 @@ impl Disktree {
         });
     }
 
+    /// Compare the tree on screen with an earlier scan, after writing it into
+    /// the history when `record` is set. Off the UI thread: both touch files.
+    fn refresh_growth(&mut self, record: bool, cx: &Context<'_, Self>) {
+        self.growth_epoch += 1;
+        let epoch = self.growth_epoch;
+        let (Some(dir), Some(tree)) =
+            (self.drift_dir.clone(), self.tree.clone())
+        else {
+            return;
+        };
+        let root = self.root_path.clone();
+        let options = self.options.clone();
+        let now = self.scanned_at;
+        let since = now - self.growth_window.days() * 86_400;
+        let task = cx.background_executor().spawn(async move {
+            let recorded = if record {
+                drift::record(&dir, &root, &tree, &options, now)
+            } else {
+                Ok(())
+            };
+            let growth = drift::baseline(&dir, &root, &options, since, now)
+                .map(|baseline| {
+                    baseline.map(|base| drift::growth(&root, &tree, &base))
+                });
+            (recorded, growth)
+        });
+        cx.spawn(async move |this, cx| {
+            let (recorded, growth) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if epoch != this.growth_epoch {
+                    return;
+                }
+                if let Err(error) = recorded {
+                    this.notice = Some((
+                        format!("could not save scan history: {error}"),
+                        Status::Warning,
+                    ));
+                }
+                match growth {
+                    Ok(growth) => {
+                        this.growth = growth.map(Arc::new);
+                    }
+                    Err(error) => {
+                        this.notice = Some((
+                            format!("could not read scan history: {error}"),
+                            Status::Warning,
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Measure growth over `window` instead.
+    pub fn set_growth_window(
+        &mut self,
+        window: GrowthWindow,
+        cx: &Context<'_, Self>,
+    ) {
+        if self.growth_window != window {
+            self.growth_window = window;
+            self.refresh_growth(false, cx);
+        }
+    }
+
     /// Ask git about `path` once, off the UI thread, if it is a checkout.
     pub fn ensure_git(&mut self, path: &Path, cx: &Context<'_, Self>) {
         if self.git.contains_key(path) || self.git_pending.contains(path) {
@@ -935,6 +1047,8 @@ impl Disktree {
         self.view = View::default();
         self.cache = None;
         self.insights.clear();
+        self.growth = None;
+        self.growth_epoch += 1;
         self.git.clear();
         self.clear_filter();
         self.scan_started = Some(Instant::now());
@@ -1002,6 +1116,7 @@ impl Disktree {
                 discard(self.tree.replace(Arc::new(node)));
                 self.cache = None;
                 self.refresh_insights();
+                self.refresh_growth(true, cx);
                 self.scan_elapsed =
                     self.scan_started.map(|started| started.elapsed());
                 if let Some(from) = came_from {
@@ -1801,8 +1916,8 @@ impl Disktree {
 
         // Hue comes from the node's kind; lightness from its depth in this
         // view, so the first level always reads as the first level.
-        let age = self.color_mode == ColorMode::Age;
         let now = self.scanned_at;
+        let growth = self.growth.clone();
         let mut decorations = Vec::with_capacity(tiles.len());
         let mut labels = Vec::new();
         for tile in &tiles {
@@ -1812,12 +1927,24 @@ impl Disktree {
                 TileKind::Others { .. } => None,
             };
             let category = node.map_or_else(Default::default, |n| n.category);
-            let age_bucket = (age && node.is_some_and(|n| n.modified > 0))
-                .then(|| {
-                    let days =
-                        (now - node.map_or(now, |n| n.modified)) / 86_400;
-                    crate::palette::age_bucket(days)
-                });
+            let ramp = match self.color_mode {
+                ColorMode::Kind => None,
+                ColorMode::Age => {
+                    node.filter(|node| node.modified > 0).map(|node| {
+                        let days = (now - node.modified) / 86_400;
+                        Ramp::Age(crate::palette::age_bucket(days))
+                    })
+                }
+                // Without an earlier scan, or for a node both scans found
+                // small, nothing is known to have changed: steady.
+                ColorMode::Growth => node.map(|_| {
+                    let delta = growth
+                        .as_deref()
+                        .and_then(|growth| growth.delta(crumbs))
+                        .unwrap_or(0);
+                    Ramp::Growth(crate::palette::growth_bucket(delta))
+                }),
+            };
             let filtered = match self.matches.as_deref().map(|m| m.keep(crumbs))
             {
                 None | Some(Some(Keep::Whole)) => Filtered::Shown,
@@ -1834,7 +1961,7 @@ impl Disktree {
                 rect: self.animated_rect(tile.rect),
                 depth: tile.depth,
                 category,
-                age_bucket,
+                ramp,
                 reclaimable: node.is_some_and(|n| n.reclaim.is_some()),
                 filtered,
                 unreadable: node.is_some_and(|n| n.read_error),
@@ -2077,17 +2204,21 @@ impl Disktree {
         self.crumb_menu = None;
         self.transition = None;
         self.refresh_insights();
+        // Crumbs moved with the reordering; growth is kept by crumbs.
+        self.refresh_growth(false, cx);
         self.clear_filter();
         self.cache = None;
         cx.notify();
     }
 
-    /// The Size | Files | Age choice: what areas measure, and what colour
-    /// says. Age keeps areas by size, since age has no area of its own.
+    /// The Size | Files | Age | Growth choice: what areas measure, and what
+    /// colour says. Age and growth keep areas by size, since neither has an
+    /// area of its own.
     pub fn set_mode(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let (metric, color) = match index {
             1 => (Metric::Files, ColorMode::Kind),
             2 => (Metric::Bytes, ColorMode::Age),
+            3 => (Metric::Bytes, ColorMode::Growth),
             _ => (Metric::Bytes, ColorMode::Kind),
         };
         self.color_mode = color;
@@ -2097,10 +2228,11 @@ impl Disktree {
         cx.notify();
     }
 
-    /// The Size | Files | Age choice currently on.
+    /// The Size | Files | Age | Growth choice currently on.
     pub const fn mode_index(&self) -> usize {
         match (self.color_mode, self.options.metric) {
             (ColorMode::Age, _) => 2,
+            (ColorMode::Growth, _) => 3,
             (ColorMode::Kind, Metric::Files) => 1,
             (ColorMode::Kind, Metric::Bytes) => 0,
         }
@@ -2725,7 +2857,7 @@ impl Disktree {
             }
             "0" => self.reset_view(cx),
             "t" if !control => {
-                self.set_mode((self.mode_index() + 1) % 3, cx);
+                self.set_mode((self.mode_index() + 1) % 4, cx);
             }
             "r" if !control => self.start_scan(cx),
             "g" if !control => self.go_to_disk(cx),
