@@ -1,6 +1,6 @@
 //! `disktree`: find what is eating a volume, mark it, and remove it.
 //!
-//! The window opens on a treemap of the scanned root — the home directory
+//! The window opens on a treemap of the scanned root — the whole disk
 //! unless another path is given — with a breadcrumb bar, a selection line, and a
 //! live free-space meter. Marking is non-destructive until the review screen
 //! is confirmed.
@@ -58,7 +58,7 @@ disktree — a treemap of what is using your disk
 usage: disktree [OPTIONS] [PATH]
 
 arguments:
-  PATH              directory to scan (default: the home directory)
+  PATH              directory to scan (default: the whole disk)
 
 The window opens on a treemap of the root, largest first. Space marks the
 selected tile, Enter opens it, c reviews the marked list, ? lists every key.
@@ -67,7 +67,8 @@ options:
   -a, --apparent-size   measure apparent length instead of allocated blocks
   -l, --follow-links    follow symlinks
   -H, --no-hidden       skip dotfiles and dot-directories
-  -D, --disk            scan the whole disk the home directory is on
+  -D, --disk            scan the whole disk the home directory is on (the
+                        default when no PATH is given)
   -X, --cross-filesystems
                         also measure other disks, network shares and pseudo
                         filesystems mounted below PATH (off by default)
@@ -84,9 +85,9 @@ options:
                         best-effort host CPU budget; 0 disables it (80)
       --metric files    rank by file count instead of bytes
       --agent NAME      ask claude (default) or codex with e
-      --snapshot        scan PATH (default: the whole disk), save it to the
-                        growth history and exit; for a scheduled job, so
-                        history builds up while the window is closed
+      --snapshot        scan PATH, save it to the growth history and exit;
+                        for a scheduled job, so history builds up while the
+                        window is closed
   -h, --help            show this help
 ";
 
@@ -399,20 +400,15 @@ fn parse_args_with_power(
         "--disk and a PATH cannot be combined"
     );
     let home = std::env::home_dir();
-    // A scheduled snapshot covers the whole disk unless told otherwise: its
-    // history then serves as the baseline for any folder opened later.
-    let root = match root {
-        None if snapshot => home
-            .as_deref()
+    // The whole disk unless a folder is named: what fills a disk is often
+    // outside the home directory, and a whole-disk snapshot serves as the
+    // growth baseline for any folder opened later. `--disk` is kept so old
+    // invocations still work.
+    let root = root.unwrap_or_else(|| {
+        home.as_deref()
             .and_then(disktree_core::space::volume_root_for)
-            .unwrap_or_else(|| PathBuf::from("/")),
-        _ if disk => home
-            .as_deref()
-            .and_then(disktree_core::space::volume_root_for)
-            .unwrap_or_else(|| PathBuf::from("/")),
-        Some(root) => root,
-        None => home.context("no path given and no home directory")?,
-    };
+            .unwrap_or_else(|| PathBuf::from("/"))
+    });
     // Store the depth as the initial view setting rather than a scan option: it
     // is a display choice the run-time `[` and `]` keys also change.
     // Canonical, so a later widening recognises this tree in the wider walk;

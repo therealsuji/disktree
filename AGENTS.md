@@ -14,7 +14,7 @@ the removal mode, the confirmation). Marking is never destructive.
 
 ```sh
 make build                      # release build
-make run                        # build and run, scanning $HOME
+make run                        # build and run, scanning the whole disk
 make install                    # ~/.local: binary, desktop entry, icon
 make install PREFIX=/usr/local  # system-wide (needs root)
 make uninstall

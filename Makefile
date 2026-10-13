@@ -33,7 +33,7 @@ help:
 	@echo "disktree"
 	@echo
 	@echo "  make build       release build"
-	@echo "  make run         build and run, scanning $$HOME"
+	@echo "  make run         build and run, scanning the whole disk"
 	@echo "  make install     install to $(PREFIX): binary, desktop entry, icon"
 	@echo "                   (macOS: disktree.app into $(APPS))"
 	@echo "  make bundle      macOS: build target/bundle/disktree.app and its zip"

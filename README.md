@@ -5,7 +5,7 @@
 Find what is filling a disk, mark what should go, and remove it — with the
 volume's free space in view the whole time.
 
-disktree is a treemap for Omarchy. It scans your home directory by default,
+disktree is a treemap for Omarchy. It scans the whole disk by default,
 draws every directory as a nested mosaic sized by what it really costs on disk,
 and lets you walk into it with the keyboard or the mouse. Mark as much as you
 like; nothing happens until you review the list and commit, and the permanent
