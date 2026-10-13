@@ -86,8 +86,8 @@ pub mod size {
     pub const METER: Rems = Rems(0.3125);
     /// The meter on the scanning panel.
     pub const SCANNING_METER: Rems = Rems(26.25);
-    /// The Size | Files | Age | Growth choice in the settings row.
-    pub const RANKING_CHOICE: Rems = Rems(13.0);
+    /// The Size | Files | Age | Trend choice in the settings row.
+    pub const RANKING_CHOICE: Rems = Rems(13.5);
     /// The review screen's summary column.
     pub const REVIEW_SUMMARY: Rems = Rems(22.5);
     /// The review list's share-bar lane.

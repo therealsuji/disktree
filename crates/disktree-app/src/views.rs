@@ -802,7 +802,7 @@ fn view_settings(
                 ChoiceItem::new("size", "Size"),
                 ChoiceItem::new("files", "Files"),
                 ChoiceItem::new("age", "Age"),
-                ChoiceItem::new("growth", "Growth"),
+                ChoiceItem::new("growth", "Trend"),
             ],
             Some(app.mode_index()),
             move |index, window, cx| {
@@ -3752,10 +3752,7 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
             "Filter by name: only matches keep their colour; enter shows only them",
         ),
         ("c", "Review the marked list"),
-        (
-            "t",
-            "Size, files, age or growth: what areas and colours say",
-        ),
+        ("t", "Size, files, age or trend: what areas and colours say"),
         ("e", "Ask a local agent what it is and if it can go"),
         ("r", "Scan again from the same root"),
         ("esc", "Stop a scan in progress"),
