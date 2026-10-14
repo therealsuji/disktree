@@ -29,7 +29,7 @@ use disktree_core::treemap::{
 use gpui_kit::{
     Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, NavigationDirection, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Size, Window, px, size,
+    ScrollHandle, ScrollWheelEvent, Size, Window, px, size,
 };
 use gpui_omarchy::Status;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -51,12 +51,29 @@ pub enum ColorMode {
     Growth,
 }
 
-/// What a local agent said about a path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Answer {
-    Pending,
-    Said(String),
-    Failed(String),
+/// A conversation with the local agent about one path. `e` on another
+/// path starts a new one in its place.
+pub struct Chat {
+    id: u64,
+    pub path: PathBuf,
+    /// Where the agent runs: the path, or the folder holding a file.
+    dir: PathBuf,
+    /// What disktree measured, at the head of every message.
+    context: String,
+    pub turns: Vec<crate::agent::Turn>,
+    /// The follow-up being typed.
+    pub draft: String,
+    /// An answer is on its way; nothing more is sent until it lands.
+    pub waiting: bool,
+    pub scroll: ScrollHandle,
+}
+
+/// What the side panel shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelTab {
+    #[default]
+    Details,
+    Chat,
 }
 
 /// How far back growth is measured.
@@ -467,9 +484,13 @@ pub struct Disktree {
     /// The local agent `e` asks, and where it is; `None` when neither is
     /// installed.
     pub agent: Option<(crate::agent::Agent, PathBuf)>,
-    /// What the agent said, per path asked about. Kept across scans: what
-    /// a directory is does not change when it is measured again.
-    pub answers: FxHashMap<PathBuf, Answer>,
+    /// The conversation with the agent, kept across scans: what a
+    /// directory is does not change when it is measured again.
+    pub chat: Option<Chat>,
+    chats_started: u64,
+    pub panel_tab: PanelTab,
+    /// The chat's field has the keyboard, as the search field can.
+    pub chat_typing: bool,
     /// What git knows about each checkout that has been selected; `None`
     /// once asked and found not to be one.
     pub git: FxHashMap<PathBuf, Option<GitState>>,
@@ -593,7 +614,10 @@ impl Disktree {
             growth_window: GrowthWindow::default(),
             growth_epoch: 0,
             agent: crate::agent::find(None),
-            answers: FxHashMap::default(),
+            chat: None,
+            chats_started: 0,
+            panel_tab: PanelTab::default(),
+            chat_typing: false,
             git: FxHashMap::default(),
             git_pending: FxHashSet::default(),
             device: None,
@@ -887,28 +911,33 @@ impl Disktree {
         }
     }
 
-    /// `e`: ask the local agent what the pointed-at entry is and whether it
-    /// can go. Off the UI thread; the answer shows in the selection panel.
+    /// `e`: chat with the local agent about the pointed-at entry. The
+    /// chat opens with what it is and whether it can go; an entry already
+    /// being chatted about goes back to that chat.
     pub fn ask_agent(&mut self, cx: &mut Context<'_, Self>) {
-        let Some((agent, binary)) = self.agent.clone() else {
+        if self.agent.is_none() {
             self.notice = Some((
                 "no local agent found: install claude or codex".into(),
                 Status::Warning,
             ));
             cx.notify();
             return;
-        };
+        }
         let Some(crumbs) = self.action_target() else {
             return;
         };
-        let (Some(node), Some(path)) =
-            (self.node_at(&crumbs), self.path_at(&crumbs))
-        else {
+        let Some(path) = self.path_at(&crumbs) else {
             return;
         };
-        if self.answers.get(&path) == Some(&Answer::Pending) {
+        if self.chat.as_ref().is_some_and(|chat| chat.path == path) {
+            self.panel_tab = PanelTab::Chat;
+            self.chat_typing = true;
+            cx.notify();
             return;
         }
+        let Some(node) = self.node_at(&crumbs) else {
+            return;
+        };
         let growth = self
             .growth
             .as_deref()
@@ -946,18 +975,83 @@ impl Disktree {
                 })
                 .collect(),
         };
-        self.answers.insert(path.clone(), Answer::Pending);
-        let task = cx
-            .background_executor()
-            .spawn(async move { crate::agent::ask(agent, &binary, &question) });
+        let Some(context) = question.context() else {
+            self.notice = Some((
+                "this name cannot be put in a prompt safely".into(),
+                Status::Warning,
+            ));
+            cx.notify();
+            return;
+        };
+        let dir = if question.is_dir {
+            path.clone()
+        } else {
+            path.parent()
+                .map_or_else(|| path.clone(), Path::to_path_buf)
+        };
+        self.chats_started += 1;
+        self.panel_tab = PanelTab::Chat;
+        self.chat_typing = true;
+        self.chat = Some(Chat {
+            id: self.chats_started,
+            path,
+            dir,
+            context,
+            turns: Vec::new(),
+            draft: String::new(),
+            waiting: false,
+            scroll: ScrollHandle::new(),
+        });
+        self.send_chat(crate::agent::FIRST_QUESTION, cx);
+    }
+
+    /// Say `text` in the chat and ask the agent for its reply, off the UI
+    /// thread. Ignored while a reply is on its way.
+    pub fn send_chat(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        use crate::agent::{Speaker, Turn};
+        let Some((agent, binary)) = self.agent.clone() else {
+            return;
+        };
+        let Some(chat) = &mut self.chat else {
+            return;
+        };
+        let text = text.trim().to_owned();
+        if chat.waiting || text.is_empty() {
+            return;
+        }
+        chat.turns.push(Turn {
+            speaker: Speaker::Person,
+            text,
+        });
+        chat.waiting = true;
+        chat.scroll.scroll_to_bottom();
+        let prompt = crate::agent::prompt(&chat.context, &chat.turns);
+        let (id, dir) = (chat.id, chat.dir.clone());
+        let task = cx.background_executor().spawn(async move {
+            crate::agent::ask(agent, &binary, &dir, &prompt)
+        });
         cx.spawn(async move |this, cx| {
-            let answer = match task.await {
-                Ok(text) => Answer::Said(text),
-                Err(error) => Answer::Failed(error),
+            let turn = match task.await {
+                Ok(text) => Turn {
+                    speaker: Speaker::Agent,
+                    text,
+                },
+                Err(error) => Turn {
+                    speaker: Speaker::Failure,
+                    text: error,
+                },
             };
             let _ = this.update(cx, |this, cx| {
-                this.answers.insert(path, answer);
-                cx.notify();
+                // A reply for a chat that has since been replaced is
+                // dropped with it.
+                if let Some(chat) = &mut this.chat
+                    && chat.id == id
+                {
+                    chat.turns.push(turn);
+                    chat.waiting = false;
+                    chat.scroll.scroll_to_bottom();
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -2799,6 +2893,36 @@ impl Disktree {
                 self.show_help = false;
                 cx.notify();
             }
+            return;
+        }
+
+        // So does the chat's field. Escape gives the keyboard back to the
+        // map and leaves the chat on screen.
+        if self.screen == Screen::Explore
+            && self.chat_typing
+            && let Some(chat) = &mut self.chat
+        {
+            match key {
+                "escape" => self.chat_typing = false,
+                "enter" if !chat.waiting => {
+                    let text = std::mem::take(&mut chat.draft);
+                    self.send_chat(&text, cx);
+                }
+                "backspace" => {
+                    chat.draft.pop();
+                }
+                _ => {
+                    let typed = event
+                        .keystroke
+                        .key_char
+                        .as_deref()
+                        .unwrap_or(event.keystroke.key.as_str());
+                    if !control && typed.chars().count() == 1 {
+                        chat.draft.push_str(typed);
+                    }
+                }
+            }
+            cx.notify();
             return;
         }
 

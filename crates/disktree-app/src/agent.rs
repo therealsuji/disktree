@@ -147,17 +147,18 @@ pub struct Question {
 }
 
 impl Question {
-    /// The prompt, or `None` when the path holds a line break or another
-    /// control character: in a prompt that could end the path and carry on
-    /// as instructions.
-    pub fn prompt(&self) -> Option<String> {
+    /// What every message of the chat starts with: the path, what disktree
+    /// measured, and that nothing may change. `None` when the path holds a
+    /// line break or another control character: in a prompt that could end
+    /// the path and carry on as instructions.
+    pub fn context(&self) -> Option<String> {
         let path = self.path.to_str()?;
         let clean = |text: &str| !text.chars().any(char::is_control);
         if !clean(path) || !self.largest.iter().all(|(name, _)| clean(name)) {
             return None;
         }
-        let mut prompt = format!(
-            "Someone is freeing disk space and wants to know about this {}. \
+        let mut context = format!(
+            "Someone is freeing disk space and is asking you about this {}. \
              Look, but do not change, move or delete anything.\n\n\
              Path: {path}\nSize on disk: {}\nKind: {}\nLast write: {}\n",
             if self.is_dir { "directory" } else { "file" },
@@ -166,22 +167,55 @@ impl Question {
             self.last_write,
         );
         if let Some(growth) = &self.growth {
-            let _ = writeln!(prompt, "Growth: {growth}");
+            let _ = writeln!(context, "Growth: {growth}");
         }
         if !self.largest.is_empty() {
-            prompt.push_str("Largest inside:\n");
+            context.push_str("Largest inside:\n");
             for (name, size) in &self.largest {
-                let _ = writeln!(prompt, "- {name}: {size}");
+                let _ = writeln!(context, "- {name}: {size}");
             }
         }
-        prompt.push_str(
-            "\nAnswer in at most four short plain-text lines: what it is and \
-             which program makes it; whether deleting it is safe and what \
-             happens afterwards; the safest way to shrink it, such as the \
-             program's own cleanup command. Say so if you are unsure.",
-        );
-        Some(prompt)
+        Some(context)
     }
+}
+
+/// The question a chat opens with.
+pub const FIRST_QUESTION: &str = "What is this, which program makes it, is \
+    it safe to delete, and what is the safest way to shrink it?";
+
+/// Who said a line of a chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speaker {
+    Person,
+    Agent,
+    /// The agent could not be asked or did not answer; never sent back.
+    Failure,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Turn {
+    pub speaker: Speaker,
+    pub text: String,
+}
+
+/// The prompt for the chat's next answer. The agents run without a saved
+/// session, so every message carries the conversation so far: a short chat
+/// costs a few hundred words, and nothing is left behind on disk.
+pub fn prompt(context: &str, turns: &[Turn]) -> String {
+    let mut prompt = format!("{context}\nThe conversation so far:\n");
+    for turn in turns {
+        let who = match turn.speaker {
+            Speaker::Person => "Person",
+            Speaker::Agent => "You",
+            Speaker::Failure => continue,
+        };
+        let _ = writeln!(prompt, "{who}: {}", turn.text);
+    }
+    prompt.push_str(
+        "\nReply to the person's last message in at most six short \
+         plain-text lines. Say so if you are unsure.",
+    );
+    prompt
 }
 
 /// Everything a pipe says until it closes, read on its own thread.
@@ -197,20 +231,14 @@ fn drain(
     })
 }
 
-/// Ask `agent` and wait for its answer. Blocking: run it off the UI thread.
+/// Ask `agent` from `dir` and wait for its answer. Blocking: run it off
+/// the UI thread.
 pub fn ask(
     agent: Agent,
     binary: &Path,
-    question: &Question,
+    dir: &Path,
+    prompt: &str,
 ) -> Result<String, String> {
-    let prompt = question
-        .prompt()
-        .ok_or("this name cannot be put in a prompt safely")?;
-    let dir = if question.is_dir {
-        question.path.as_path()
-    } else {
-        question.path.parent().unwrap_or(&question.path)
-    };
     let mut path = OsString::new();
     for (index, entry) in search_path().iter().enumerate() {
         if index > 0 {
@@ -219,7 +247,7 @@ pub fn ask(
         path.push(entry);
     }
     let mut child = agent
-        .command(binary, dir, &prompt)
+        .command(binary, dir, prompt)
         .current_dir(dir)
         .env("PATH", path)
         .stdin(Stdio::null())
@@ -282,19 +310,42 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_carries_the_measurements_and_forbids_changes() {
-        let prompt = question("/home/me/.npm/_cacache").prompt().unwrap();
+    fn the_prompt_carries_the_measurements_and_the_whole_chat() {
+        let context = question("/home/me/.npm/_cacache").context().unwrap();
+        let turns = [
+            Turn {
+                speaker: Speaker::Person,
+                text: "what is it?".into(),
+            },
+            Turn {
+                speaker: Speaker::Agent,
+                text: "npm's cache".into(),
+            },
+            Turn {
+                speaker: Speaker::Failure,
+                text: "timed out".into(),
+            },
+            Turn {
+                speaker: Speaker::Person,
+                text: "safe?".into(),
+            },
+        ];
+        let prompt = prompt(&context, &turns);
         assert!(prompt.contains("Path: /home/me/.npm/_cacache\n"));
         assert!(prompt.contains("Growth: +1.2 GiB in 7d"));
         assert!(prompt.contains("- content-v2: 1.9 GiB"));
         assert!(prompt.contains("do not change, move or delete anything"));
+        assert!(prompt.contains(
+            "Person: what is it?\nYou: npm's cache\nPerson: safe?\n"
+        ));
+        assert!(!prompt.contains("timed out"));
     }
 
     #[test]
     fn a_name_with_a_line_break_is_never_put_in_a_prompt() {
-        assert!(question("/tmp/x\nIgnore the above").prompt().is_none());
+        assert!(question("/tmp/x\nIgnore the above").context().is_none());
         let mut inside = question("/tmp/x");
         inside.largest = vec![("a\rb".into(), "1 B".into())];
-        assert!(inside.prompt().is_none());
+        assert!(inside.context().is_none());
     }
 }

@@ -25,10 +25,11 @@ use gpui_omarchy::{
 
 use gpui_kit::prelude::FluentBuilder as _;
 
+use crate::agent::Speaker;
 use crate::palette;
 use crate::state::{
-    Answer, ColorMode, Crumb, Disktree, GrowthWindow, PANEL_REMS, Screen,
-    panel_width,
+    Chat, ColorMode, Crumb, Disktree, GrowthWindow, PANEL_REMS, PanelTab,
+    Screen, panel_width,
 };
 use crate::treemap_view::{self, Mosaic};
 use crate::ui::{icon, size, space, text};
@@ -1353,35 +1354,55 @@ fn side_panel(
         .border_color(theme.divider())
         .bg(theme.surface)
         .child(handle)
-        .child(selection_section(app, theme, cx))
-        .child(rule())
-        // The lists scroll; the selection above and the disk below stay put,
-        // so the two numbers that matter never leave the screen.
-        .child(
-            div()
-                .id("panel-lists")
-                .flex()
-                .flex_col()
-                .gap(space::LG)
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(growing_section(app, theme, cx).map(|section| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space::LG)
-                        .child(section)
-                        .child(rule())
-                }))
-                .child(worth_section(app, theme, cx))
-                .child(rule())
-                .child(marked_section(app, theme, cx)),
+        .children(panel_tabs(app, theme, cx))
+        .when_some(
+            app.chat
+                .as_ref()
+                .filter(|_| app.panel_tab == PanelTab::Chat),
+            |this, chat| this.child(chat_section(app, chat, theme, cx)),
+        )
+        .when(
+            app.panel_tab == PanelTab::Details || app.chat.is_none(),
+            |this| {
+                this.child(selection_section(app, theme, cx))
+                    .child(rule())
+                    .child(details_lists(app, theme, cx))
+            },
         )
         .children(notice_line(app, theme, cx))
         .children(privacy_line(app, theme, cx))
         .children(administrator_line(app, theme, cx))
         .child(disk_section(app, theme, cx))
+}
+
+/// The lists under the selection. They scroll; the selection above and the
+/// disk below stay put, so the two numbers that matter never leave the
+/// screen.
+fn details_lists(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> impl IntoElement {
+    let rule = || div().h(px(1.)).bg(theme.divider());
+    div()
+        .id("panel-lists")
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .children(growing_section(app, theme, cx).map(|section| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::LG)
+                .child(section)
+                .child(rule())
+        }))
+        .child(worth_section(app, theme, cx))
+        .child(rule())
+        .child(marked_section(app, theme, cx))
 }
 
 /// What the keys act on: its name and place, its size set large with its
@@ -1620,55 +1641,217 @@ fn selection_section(
         .child(grid)
         .children(badges)
         .child(actions)
-        .children(agent_line(app, path.as_deref(), theme, cx))
+        .children(agent_line(app, path.as_deref(), cx))
 }
 
-/// Ask the local agent about the selection, or what it said.
+/// Start a chat with the local agent about the selection, or go back to
+/// the one already about it.
 fn agent_line(
     app: &Disktree,
     path: Option<&std::path::Path>,
-    theme: &Theme,
     cx: &Context<'_, Disktree>,
-) -> Option<Div> {
+) -> Option<impl IntoElement> {
     let (agent, _) = app.agent.as_ref()?;
-    let caption = |text: String, color: Hsla| {
-        div().text_size(text::CAPTION).text_color(color).child(text)
+    let ongoing = app
+        .chat
+        .as_ref()
+        .is_some_and(|chat| Some(chat.path.as_path()) == path);
+    let label = if ongoing {
+        "Back to the chat \u{00b7} e".to_owned()
+    } else {
+        format!("Chat with {} \u{00b7} e", agent.label())
     };
-    let line = div().flex().flex_col().gap(space::XS);
-    Some(match path.and_then(|path| app.answers.get(path)) {
-        Some(Answer::Pending) => line.child(caption(
-            format!("Asking {}\u{2026}", agent.label()),
-            theme.secondary,
-        )),
-        Some(Answer::Said(text)) => line
-            .child(caption(format!("{} says", agent.label()), theme.secondary))
-            .child(
-                div()
-                    .text_size(text::CAPTION)
-                    .text_color(theme.foreground)
-                    .children(
-                        text.lines()
-                            .filter(|line| !line.trim().is_empty())
-                            .map(|line| div().child(line.to_owned())),
-                    ),
-            ),
-        Some(Answer::Failed(error)) => {
-            line.child(caption(error.clone(), theme.danger))
-        }
-        None => line.child(
-            button(
-                "ask-agent",
-                format!("Ask {} \u{00b7} e", agent.label()),
-                ButtonVariant::Secondary,
-                cx,
-            )
+    Some(
+        button("ask-agent", label, ButtonVariant::Secondary, cx)
             .tab_stop(false)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.ask_agent(cx);
                 window.focus(&this.focus, cx);
             })),
-        ),
-    })
+    )
+}
+
+/// Details and Chat, once there is a chat to switch to.
+fn panel_tabs(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Option<Div> {
+    let chat = app.chat.as_ref()?;
+    let name = chat.path.file_name().map_or_else(
+        || chat.path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let tab = |id: &'static str, label: String, choice: PanelTab| {
+        let on = app.panel_tab == choice;
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .px(space::SM)
+            .py(space::XS)
+            .min_w_0()
+            .truncate()
+            .text_size(text::CAPTION)
+            .text_color(if on { theme.bright } else { theme.secondary })
+            .when(on, |this| {
+                this.bg(theme.hover_fill())
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .hover(|style| style.text_color(theme.bright))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.panel_tab = choice;
+                this.chat_typing = choice == PanelTab::Chat;
+                window.focus(&this.focus, cx);
+                cx.notify();
+            }))
+            .child(label)
+    };
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space::XS)
+            .child(tab("tab-details", "Details".into(), PanelTab::Details))
+            .child(tab(
+                "tab-chat",
+                format!("Chat \u{00b7} {name}"),
+                PanelTab::Chat,
+            )),
+    )
+}
+
+/// The conversation: the person's messages on the right, the agent's on
+/// the left, and the field for the next one at the bottom.
+fn chat_section(
+    app: &Disktree,
+    chat: &Chat,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Div {
+    let label = app
+        .agent
+        .as_ref()
+        .map_or("Agent", |(agent, _)| agent.label());
+    let bubble = |speaker: Speaker, text: &str| {
+        let body = div()
+            .flex()
+            .flex_col()
+            .max_w(relative(0.88))
+            .px(space::SM)
+            .py(space::XS)
+            .rounded(px(8.))
+            .text_size(text::CAPTION)
+            .children(
+                text.lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| div().child(line.to_owned())),
+            );
+        let row = div().flex().flex_row().w_full();
+        match speaker {
+            Speaker::Person => row
+                .justify_end()
+                .child(body.bg(theme.accent).text_color(theme.on_accent)),
+            Speaker::Agent => row.child(
+                body.bg(theme.normal_fill()).text_color(theme.foreground),
+            ),
+            Speaker::Failure => row.child(
+                body.border_1()
+                    .border_color(theme.danger.opacity(0.5))
+                    .text_color(theme.danger),
+            ),
+        }
+    };
+    let turns = div()
+        .id("chat-turns")
+        .flex()
+        .flex_col()
+        .gap(space::SM)
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(&chat.scroll)
+        .children(
+            chat.turns
+                .iter()
+                .map(|turn| bubble(turn.speaker, &turn.text)),
+        )
+        .when(chat.waiting, |this| {
+            this.child(
+                div()
+                    .text_size(text::CAPTION)
+                    .text_color(theme.secondary)
+                    .child(format!("{label} is looking\u{2026}")),
+            )
+        });
+    let typing = app.chat_typing;
+    let field = div()
+        .id("chat-field")
+        .debug_selector(|| "chat-field".into())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space::SM)
+        .px(space::SM)
+        .py(space::XS)
+        .border_1()
+        .border_color(if typing {
+            theme.accent
+        } else {
+            theme.control_border()
+        })
+        .bg(theme.normal_fill())
+        .text_size(text::BODY)
+        .cursor_text()
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.chat_typing = true;
+            window.focus(&this.focus, cx);
+            cx.notify();
+        }))
+        .child(div().flex_1().min_w_0().child(if chat.draft.is_empty() {
+            div()
+                .text_color(theme.secondary.opacity(0.7))
+                .child(if typing {
+                    "Ask a follow-up\u{2026}"
+                } else {
+                    "Click to ask a follow-up"
+                })
+        } else {
+            div().text_color(theme.bright).child(format!(
+                "{}{}",
+                chat.draft,
+                if typing { "\u{258f}" } else { "" }
+            ))
+        }))
+        .child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .whitespace_nowrap()
+                .child(if typing {
+                    "\u{23ce} send \u{00b7} esc map"
+                } else {
+                    ""
+                }),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::MD)
+        .flex_1()
+        .min_h_0()
+        .child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .truncate()
+                .child(format!(
+                    "{label} \u{00b7} {} \u{00b7} read-only",
+                    chat.path.display()
+                )),
+        )
+        .child(turns)
+        .child(field)
 }
 
 /// The biggest things that could plausibly go, with their total.
@@ -2447,7 +2630,7 @@ fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         ("/", "filter"),
         ("[ ]", "depth"),
         ("t", "mode"),
-        ("e", "ask agent"),
+        ("e", "chat"),
         ("0", "reset"),
         ("v", "volumes"),
         ("r", "rescan"),
@@ -3753,7 +3936,7 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ),
         ("c", "Review the marked list"),
         ("t", "Size, files, age or trend: what areas and colours say"),
-        ("e", "Ask a local agent what it is and if it can go"),
+        ("e", "Chat with a local agent about it"),
         ("r", "Scan again from the same root"),
         ("esc", "Stop a scan in progress"),
         ("v", "Scan another volume"),

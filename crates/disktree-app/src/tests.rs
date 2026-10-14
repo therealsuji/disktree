@@ -1894,43 +1894,55 @@ fn growth_mode_lists_what_grew_since_an_earlier_scan(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("growth-24h").is_some());
 }
 
-/// `e` asks the local agent about the selection off the UI thread and shows
-/// what it said; the agent is handed the measurements and the read-only
-/// flags, never a way to delete.
+/// `e` opens a chat with the local agent about the selection, off the UI
+/// thread; a follow-up carries the conversation so far. The agent is handed
+/// the measurements and the read-only flags, never a way to delete.
 #[cfg(unix)]
 #[gpui_kit::test]
-fn e_asks_the_local_agent_and_shows_its_answer(cx: &mut TestAppContext) {
+fn e_chats_with_the_local_agent(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use crate::agent::Agent;
-    use crate::state::Answer;
+    use crate::agent::{Agent, Speaker};
+    use crate::state::PanelTab;
 
     cx.update(gpui_omarchy::init);
     let temp = fixture();
     let bin = tempfile::tempdir().expect("bin");
     let claude = bin.path().join("claude");
-    // Answers with the flags it was given, so the test sees them.
-    std::fs::write(&claude, "#!/bin/sh\necho \"cache: $2 $3\"\n")
-        .expect("write the fake agent");
+    // Answers with the flags it was given and how many messages from the
+    // person its prompt holds, so the test sees both.
+    std::fs::write(
+        &claude,
+        "#!/bin/sh\nfor a; do last=$a; done\n\
+         echo \"$2 $3 $(printf '%s' \"$last\" | grep -c '^Person:')\"\n",
+    )
+    .expect("write the fake agent");
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755))
         .expect("chmod");
 
     let (view, cx) = view_over(temp.path(), cx);
-    let selected = update(&view, cx, |app, _| {
+    update(&view, cx, |app, _| {
         app.agent = Some((Agent::Claude, claude.clone()));
-        app.selected
-            .as_deref()
-            .and_then(|crumbs| app.path_at(crumbs))
-    })
-    .expect("a selection");
+    });
     draw(cx);
     press(cx, "e");
     cx.run_until_parked();
     draw(cx);
+    press(cx, "w h y enter");
+    cx.run_until_parked();
+    draw(cx);
 
-    let answer = read(&view, cx, |app| app.answers.get(&selected).cloned());
-    assert_eq!(
-        answer,
-        Some(Answer::Said("cache: --tools Read,Glob,Grep".into()))
-    );
+    let (tab, said) = read(&view, cx, |app| {
+        let turns = &app.chat.as_ref().expect("a chat").turns;
+        let said: Vec<(Speaker, String)> = turns
+            .iter()
+            .map(|turn| (turn.speaker, turn.text.clone()))
+            .collect();
+        (app.panel_tab, said)
+    });
+    assert_eq!(tab, PanelTab::Chat);
+    assert_eq!(said.len(), 4);
+    assert_eq!(said[1], (Speaker::Agent, "--tools Read,Glob,Grep 1".into()));
+    assert_eq!(said[2], (Speaker::Person, "why".into()));
+    assert_eq!(said[3], (Speaker::Agent, "--tools Read,Glob,Grep 2".into()));
 }
