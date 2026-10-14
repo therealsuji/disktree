@@ -54,6 +54,20 @@ pub const fn administrator() -> Option<bool> {
     None
 }
 
+/// Whether this process runs as root, which reads folders Full Disk
+/// Access does not open. Always `false` on Windows.
+#[cfg(not(windows))]
+pub fn as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// Whether this process runs as root, which reads folders Full Disk
+/// Access does not open. Always `false` on Windows.
+#[cfg(windows)]
+pub const fn as_root() -> bool {
+    false
+}
+
 /// Whether an administrator would read `root` from its file table: a
 /// whole NTFS drive. Always `false` off Windows.
 #[cfg(windows)]

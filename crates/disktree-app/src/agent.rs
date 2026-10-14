@@ -6,6 +6,10 @@
 //!
 //! An app opened from the Dock or Finder gets a bare `PATH`, so the agents
 //! are looked for where their installers put them as well as on `PATH`.
+//!
+//! Opened as root (`make admin`), the app asks as the person at the
+//! screen instead: root is not signed in to any agent, and an agent run as
+//! root could read and write as root.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -50,7 +54,7 @@ impl Agent {
 
     /// The command that asks `prompt` about `dir`, read-only.
     fn command(self, binary: &Path, dir: &Path, prompt: &str) -> Command {
-        let mut command = Command::new(binary);
+        let mut command = as_console_user(binary);
         match self {
             Self::Claude => {
                 command
@@ -70,6 +74,34 @@ impl Agent {
         }
         command
     }
+}
+
+/// `binary`, run as whoever owns the console when this process is root.
+/// `launchctl asuser` joins that user's login session, which holds the
+/// keychain the agent's sign-in lives in; `sudo -H` then drops to the user
+/// with their home folder.
+#[cfg(unix)]
+fn as_console_user(binary: &Path) -> Command {
+    use std::os::unix::fs::MetadataExt as _;
+    let console = std::fs::metadata("/dev/console").map(|meta| meta.uid());
+    match console {
+        Ok(uid) if disktree_core::access::as_root() && uid != 0 => {
+            let mut command = Command::new("/bin/launchctl");
+            command
+                .arg("asuser")
+                .arg(uid.to_string())
+                .args(["/usr/bin/sudo", "-H", "-u"])
+                .arg(format!("#{uid}"))
+                .arg(binary);
+            command
+        }
+        _ => Command::new(binary),
+    }
+}
+
+#[cfg(not(unix))]
+fn as_console_user(binary: &Path) -> Command {
+    Command::new(binary)
 }
 
 /// Directories searched for an agent: `PATH`, then where the installers

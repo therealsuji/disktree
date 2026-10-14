@@ -96,18 +96,8 @@ fn settings(options: &ScanOptions) -> String {
         u8::from(options.one_filesystem),
         u8::from(options.dedup_hardlinks),
         depth,
-        u8::from(as_root()),
+        u8::from(crate::access::as_root()),
     )
-}
-
-#[cfg(not(windows))]
-fn as_root() -> bool {
-    rustix::process::geteuid().is_root()
-}
-
-#[cfg(windows)]
-const fn as_root() -> bool {
-    false
 }
 
 /// Write `tree`, scanned from `root` at `taken`, into `dir` unless that day
