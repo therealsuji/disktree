@@ -245,8 +245,21 @@ pub fn drift_dir() -> Option<PathBuf> {
 /// `--snapshot`: what the window does when a scan lands, without the window.
 fn snapshot(root: &std::path::Path, options: &ScanOptions) -> Result<()> {
     let dir = drift_dir().context("no configuration directory")?;
-    let tree = disktree_core::scan::scan(root, options.clone())
+    let scan = disktree_core::scan::ScanHandle::spawn(
+        root.to_path_buf(),
+        options.clone(),
+    );
+    let tree = scan
+        .wait()
         .with_context(|| format!("cannot scan {}", root.display()))?;
+    // Into the job's log, so what a scan could not read can be looked up.
+    let progress = scan.progress.snapshot();
+    if progress.errors > 0 {
+        eprintln!("{} unreadable, the first of them:", progress.errors);
+        for message in &progress.messages {
+            eprintln!("  {message}");
+        }
+    }
     let taken = state::now_seconds();
     disktree_core::drift::record(&dir, root, &tree, options, taken)
         .with_context(|| format!("cannot write to {}", dir.display()))?;

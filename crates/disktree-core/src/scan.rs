@@ -258,6 +258,13 @@ impl ScanHandle {
         }
     }
 
+    /// Block until the walk is done and take the tree.
+    pub fn wait(&self) -> io::Result<Node> {
+        self.result.recv().unwrap_or_else(|_| {
+            Err(io::Error::other("the scan worker stopped without a result"))
+        })
+    }
+
     /// Abandon the walk; the worker still finishes the directory it is in.
     pub fn cancel(&self) {
         self.progress.cancel();
