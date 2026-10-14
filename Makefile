@@ -27,7 +27,7 @@ ICON = assets/disktree.svg
 DESKTOP = packaging/disktree.desktop.in
 
 .PHONY: help build run install uninstall bundle lint test ci fmt clean \
-	schedule unschedule
+	schedule unschedule admin
 
 help:
 	@echo "disktree"
@@ -40,6 +40,7 @@ help:
 	@echo "  make uninstall   remove what install put there"
 	@echo "  make schedule    macOS: snapshot the whole disk daily, for growth"
 	@echo "  make unschedule  macOS: stop the daily snapshot"
+	@echo "  make admin       macOS: open the app as root, to read every folder"
 	@echo "  make lint        rustfmt --check and clippy -D warnings"
 	@echo "  make test        core and window-harness tests"
 	@echo "  make ci          lint, then test"
@@ -111,6 +112,16 @@ schedule:
 unschedule:
 	@launchctl bootout gui/$$(id -u) "$(AGENT)" 2>/dev/null || true
 	rm -f "$(AGENT)"
+
+# Full Disk Access does not open folders owned by root or the system's
+# service accounts; only root reads those. Root keeps its own settings and
+# history under /var/root, so nothing it writes ends up root-owned in your
+# home folder, and anything it removes goes to root's Trash.
+ROOTRUN = \"$(APPS)/disktree.app/Contents/MacOS/disktree\" / >/dev/null 2>&1 &
+admin:
+	@test -x "$(APPS)/disktree.app/Contents/MacOS/disktree" || \
+	    { echo "run make install first"; exit 1; }
+	@osascript -e 'do shell script "HOME=/var/root $(ROOTRUN)" with administrator privileges'
 else
 install: build
 	install -d $(BINDIR) $(APPDIR) $(ICONDIR)

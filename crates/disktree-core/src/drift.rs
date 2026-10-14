@@ -81,20 +81,33 @@ pub struct Grower {
 
 /// What a scan's settings change about its sizes. Snapshots are only
 /// compared with scans that measured the same way: a scan without hidden
-/// files would otherwise show `~/.cache` as having shrunk to nothing.
+/// files would otherwise show `~/.cache` as having shrunk to nothing, and
+/// one run as root would show every folder only root can read as new growth.
 fn settings(options: &ScanOptions) -> String {
     let depth = options
         .max_depth
         .map_or_else(|| "none".to_owned(), |depth| depth.to_string());
     format!(
-        "apparent={} links={} hidden={} one-filesystem={} dedup={} depth={}",
+        "apparent={} links={} hidden={} one-filesystem={} dedup={} \
+         depth={} root={}",
         u8::from(options.apparent_size),
         u8::from(options.follow_links),
         u8::from(options.include_hidden),
         u8::from(options.one_filesystem),
         u8::from(options.dedup_hardlinks),
         depth,
+        u8::from(as_root()),
     )
+}
+
+#[cfg(not(windows))]
+fn as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+#[cfg(windows)]
+const fn as_root() -> bool {
+    false
 }
 
 /// Write `tree`, scanned from `root` at `taken`, into `dir` unless that day
