@@ -1,7 +1,9 @@
 //! Asking a local coding agent what something is before it goes.
 //!
-//! The agent only looks. Claude is given read tools and nothing else; Codex
-//! runs in its read-only sandbox. Removing stays with the review screen, so
+//! The agent only looks. Both run shell commands such as `du` and `lsof`
+//! inside an operating-system sandbox that refuses every write: Codex's
+//! read-only sandbox, and for Claude its Bash sandbox with all of `/` denied
+//! for writing and no way to retry outside it. Removing stays with the review screen, so
 //! no model output ever reaches a deletion.
 //!
 //! An app opened from the Dock or Finder gets a bare `PATH`, so the agents
@@ -17,9 +19,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Long enough for an agent to list and read a few files; an answer that
-/// takes longer is not going to be a quick look.
-const TIMEOUT: Duration = Duration::from_mins(3);
+/// Long enough for an agent to measure a few large folders; an answer that
+/// takes longer is not going to come.
+const TIMEOUT: Duration = Duration::from_mins(5);
+
+/// Claude's Bash sandbox: every command runs sandboxed and unprompted, a
+/// command the sandbox blocks may not be retried outside it, and nothing
+/// under `/` is writable. Without the sandbox Claude does not start.
+const CLAUDE_SANDBOX: &str = r#"{"sandbox":{"enabled":true,
+"failIfUnavailable":true,"allowUnsandboxedCommands":false,
+"autoAllowBashIfSandboxed":true,"filesystem":{"denyWrite":["/"]}}}"#;
 
 /// A local agent disktree can ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,9 +67,12 @@ impl Agent {
         match self {
             Self::Claude => {
                 command
-                    .args(["-p", "--tools", "Read,Glob,Grep"])
+                    .args(["-p", "--tools", "Read,Glob,Grep,Bash"])
                     .args(["--permission-mode", "dontAsk"])
+                    .args(["--settings", CLAUDE_SANDBOX])
                     .arg("--no-session-persistence")
+                    // Reads anywhere; the sandbox still refuses writes.
+                    .args(["--add-dir", "/", "--"])
                     .arg(prompt);
             }
             Self::Codex => {
@@ -159,7 +171,10 @@ impl Question {
         }
         let mut context = format!(
             "Someone is freeing disk space and is asking you about this {}. \
-             Look, but do not change, move or delete anything.\n\n\
+             Look, but do not change, move or delete anything. Probe it \
+             with read-only commands such as du, ls, find, lsof and ps to \
+             find what is using the space, which program writes it and \
+             why it is big.\n\n\
              Path: {path}\nSize on disk: {}\nKind: {}\nLast write: {}\n",
             if self.is_dir { "directory" } else { "file" },
             self.size,

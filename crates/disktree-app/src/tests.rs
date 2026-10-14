@@ -1942,7 +1942,13 @@ fn e_chats_with_the_local_agent(cx: &mut TestAppContext) {
     });
     assert_eq!(tab, PanelTab::Chat);
     assert_eq!(said.len(), 4);
-    assert_eq!(said[1], (Speaker::Agent, "--tools Read,Glob,Grep 1".into()));
+    assert_eq!(
+        said[1],
+        (Speaker::Agent, "--tools Read,Glob,Grep,Bash 1".into())
+    );
     assert_eq!(said[2], (Speaker::Person, "why".into()));
-    assert_eq!(said[3], (Speaker::Agent, "--tools Read,Glob,Grep 2".into()));
+    assert_eq!(
+        said[3],
+        (Speaker::Agent, "--tools Read,Glob,Grep,Bash 2".into())
+    );
 }
